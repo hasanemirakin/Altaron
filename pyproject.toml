@@ -1,0 +1,16 @@
+[tool.setuptools]
+packages = ["qntml"]
+
+[project]
+name = "QntMLsu"
+version = "0.0.0"
+authors = [
+  { name="Hasan Emir Akın", email="h.emirakn@gmail.com" },
+]
+description = ""
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
