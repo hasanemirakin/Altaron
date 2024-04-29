@@ -2,14 +2,14 @@ import pandas as pd
 import numpy as np
 import torch
 
-class QClass:
+class AltaronBaseClass:
 
     def __init__(
             self,
             **kwargs
     ):
         
-        pass
+        self.set_kwargs(kwargs)
 
     def set_allowed_kwargs(self, kwargs: list):
         """This function sets the allowed keyword arguments for the model."""
@@ -22,7 +22,13 @@ class QClass:
             self.__setattr__(k, v)
     
     def check_kwargs(self, kwargs: dict):
-        return kwargs   
+        valid_kwargs = {}
+
+        for k,v in kwargs.items():
+            if k in self.allowed_kwargs:
+                valid_kwargs[k] = v
+
+        return valid_kwargs   
     
     def to_tensor(self, series):
         """Turn series into tensors"""

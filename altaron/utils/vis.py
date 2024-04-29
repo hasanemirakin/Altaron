@@ -43,8 +43,6 @@ def plot_candlestick(
     bottom=o, width=1, color=colors, edgecolor="black")
     ax_ohlc.vlines(x=range(len(c)), ymin=l, ymax=h, colors=colors)
 
-    
-    
     if len(config["plot1"]) > 0:
         ax_ohlc.legend(loc="best")
 
@@ -111,4 +109,31 @@ def plot_pairs(
     ax_spread.set_title("Spread")
 
     plt.show()
+    plt.close()
+
+def plot_growth_comparison(
+        equities,
+        figsize=(16,6),
+        normalized=True,
+        save_to=None
+):
+    
+    style.use("ggplot")
+
+    plt.figure(figsize=figsize)
+
+    for eq, series in equities.items():
+        if normalized:
+            plot_eq = 100*series.values/series.iloc[0]
+        else:
+            plot_eq = series.values
+        
+        plt.plot(plot_eq, label=eq)
+    
+    plt.legend(loc="best")
+    plt.show()
+
+    if save_to is not None:
+        plt.savefig(save_to, bbox_inches="tight")
+    
     plt.close()

@@ -3,16 +3,16 @@ import numpy as np
 import datetime
 import os
 from tqdm import tqdm
-from altaron.base.__q_class import QClass
-from altaron.base.__strategy import QStrategy
+from altaron.base.__base import AltaronBaseClass
+from altaron.base.__strategy import TradingStrategy
 from altaron.base.__data_processor import DataProcessor
+from altaron.utils.vis import plot_growth_comparison
 
-
-class BackTestEnvironment(QClass):
+class BackTestEnvironment(AltaronBaseClass):
 
     def __init__(
             self,
-            strategy: QStrategy,
+            strategy: TradingStrategy,
             processor: DataProcessor,
             capital = 1000,
             min_bet_size = 0.01,
@@ -31,9 +31,6 @@ class BackTestEnvironment(QClass):
         ])
 
         self.capital = capital
-
-        self.equity = capital
-        self.cash = capital
         self.fee = fee
 
         assert(isinstance(min_bet_size, float) and min_bet_size >= 0. and min_bet_size <= 1.), "Wrong"
@@ -46,10 +43,16 @@ class BackTestEnvironment(QClass):
             self.cash += self.max_bet_amount*self.fee
 
         self.min_bet_amount = self.max_bet_amount*self.min_bet_size
-        
+
+        self.reset()
+    
+    def reset(self):
+        self.equity = self.capital
+        self.cash = self.capital
+
         self.trades = {}
         self.actions = []
-    
+        
     def __can_enter(
             self,
             bet_amount
@@ -81,7 +84,7 @@ class BackTestEnvironment(QClass):
             qty,
             price,
             date,
-            action="entry"
+            action="Entry"
     ):
         
         info = {
@@ -95,173 +98,6 @@ class BackTestEnvironment(QClass):
         }
 
         self.actions.append(info)
-    
-    def __report_backtest(
-            self
-    ):
-
-        ticker_groupted_actions = {
-            ticker: [
-                action for action in self.actions
-                if action["Ticker"] == ticker
-            ]
-            for ticker in self.tickers
-        }
-
-        ticker_tracking = {
-            ticker: {
-                "in_trade": False,
-                "last_trade": 0,
-                "start_side": 0,
-                "net_entry_price": 0,
-                "net_trade_qty": 0,
-                "start_date": 0,
-                "current_qty": 0,
-                "net_exit_price": 0,
-            }
-            for ticker in self.tickers
-        }
-
-        if self.actions == []:
-            return pd.DataFrame(), pd.DataFrame()
-
-        for action in self.actions:
-
-            ticker = action["Ticker"]
-            in_trade = ticker_tracking[ticker]["in_trade"]
-
-            action_side = action["Side"]
-            action_qty = action["QTY"]
-            action_price = action["Price"]
-
-            if in_trade:
-                
-                trade_side = ticker_tracking[ticker]["start_side"]
-                net_entry = ticker_tracking[ticker]["net_entry_price"]
-                net_qty = ticker_tracking[ticker]["net_trade_qty"]
-
-                #Increment trade size
-                if trade_side == action_side:
-                    
-                    ticker_tracking[ticker]["net_entry_price"] = (net_entry*net_qty + action_price*action_qty)/(net_qty+action_qty)
-
-                    ticker_tracking[ticker]["current_qty"] += action_qty
-                    ticker_tracking[ticker]["net_trade_qty"] += action_qty
-                
-                #Decrement, exit or reverse trade
-                elif trade_side != action_side:
-                    
-                    cur_qty = ticker_tracking[ticker]["current_qty"]
-
-                    net_exit = ticker_tracking[ticker]["net_exit_price"]                        
-                    net_exited_qty = ticker_tracking[ticker]["net_trade_qty"] - cur_qty
-
-                    #Decrement
-                    if cur_qty > action_qty:
-                    
-                        ticker_tracking[ticker]["net_exit_price"] = (net_exit*net_exited_qty + action_price*action_qty)/(net_exited_qty+action_qty)
-                        ticker_tracking[ticker]["current_qty"] -= action_qty
-                    
-                    #Close Trade
-                    elif cur_qty == action_qty:
-                        trade_exit_price = (net_exit*net_exited_qty + action_price*action_qty)/(net_exited_qty+action_qty)
-
-                        pnl = trade_side*net_qty*(trade_exit_price-net_entry)
-                        pnl_pct = trade_side*100*(trade_exit_price/net_entry - 1)
-                        total_fee = net_qty*self.fee*(net_entry+trade_exit_price)
-
-                        trade_info = {
-                            "Ticker": ticker,
-                            "Trade Side": trade_side,
-                            "Net QTY": net_qty,
-                            "Net Entry": net_entry,
-                            "Net Exit": trade_exit_price,
-                            "PnL": pnl,
-                            "PnL%": pnl_pct,
-                            "Fee": total_fee,
-                            "Entry Date": ticker_tracking[ticker]["start_date"],
-                            "Exit Date": action["Date"],
-                            "Exit Type": action["Action"]                 
-                        }
-
-                        lt = ticker_tracking[ticker]["last_trade"]
-                        self.trades[f"Trade{lt}"] = trade_info
-                        
-                        ticker_tracking[ticker] = {
-                            "in_trade": False,
-                            "last_trade": lt,
-                            "start_side": 0,
-                            "net_entry_price": 0,
-                            "net_trade_qty": 0,
-                            "start_date": 0,
-                            "current_qty": 0,
-                            "net_exit_price": 0,
-                        }
-
-                    #Reverse
-                    elif cur_qty < action_qty:
-                        #action_qty = cur_qty + new_position_qty
-
-                        trade_exit_price = (net_exit*net_exited_qty + action_price*cur_qty)/(net_exited_qty+cur_qty)
-
-                        pnl = trade_side*net_qty*(trade_exit_price-net_entry)
-                        pnl_pct = trade_side*100*(trade_exit_price/net_entry - 1)
-                        total_fee = net_qty*self.fee*(net_entry+trade_exit_price)
-
-                        trade_info = {
-                            "Ticker": ticker,
-                            "Trade Side": trade_side,
-                            "Net QTY": net_qty,
-                            "Net Entry": net_entry,
-                            "Net Exit": trade_exit_price,
-                            "PnL": pnl,
-                            "PnL%": pnl_pct,
-                            "Fee": total_fee,
-                            "Entry Date": ticker_tracking[ticker]["start_date"],
-                            "Exit Date": action["Date"]                           
-                        }
-
-                        lt = ticker_tracking[ticker]["last_trade"]
-                        self.trades[f"Trade{lt}"] = trade_info
-
-                        new_position_qty = action_qty - cur_qty
-
-                        ticker_tracking[ticker] = {
-                            "in_trade": True,
-                            "last_trade": lt+1,
-                            "start_side": action_side,
-                            "net_entry_price": action_price,
-                            "net_trade_qty": new_position_qty,
-                            "start_date": action["Date"],
-                            "current_qty": new_position_qty,
-                            "net_exit_price": 0,
-                        }
-
-            elif not in_trade:
-                lt = ticker_tracking[ticker]["last_trade"]
-
-                ticker_tracking[ticker] = {
-                    "in_trade": True,
-                    "last_trade": lt+1,
-                    "start_side": action_side,
-                    "net_entry_price": action_price,
-                    "net_trade_qty": action_qty,
-                    "start_date": action["Date"],
-                    "current_qty": action_qty,
-                    "net_exit_price": 0,
-                }
-        
-        trade_df = pd.DataFrame(self.trades).transpose()
-
-        actions = pd.DataFrame(
-            data=np.array([list(a.values()) for a in self.actions]), 
-            index=[f"Action{x}" for x in range(len(self.actions))],
-            columns=list(self.actions[0].keys())
-        )
-
-        stats = BackTestEvaluator(trade_df, actions, self.equity_series).report_stats()
-
-        return trade_df, actions, stats
 
     def __enter_position(
             self,
@@ -493,6 +329,26 @@ class BackTestEnvironment(QClass):
         
         return info
     
+    def __update_equity(
+            self,
+            ticker_positions: dict,
+    ):
+
+        self.equity = 0
+
+        for ticker, vals in ticker_positions.items():
+            net_entry = vals["net_entry_price"]
+
+            if net_entry is None:
+                continue
+
+            qty = vals["qty"]
+            pnl = vals["pnl_pct"]
+
+            self.equity += net_entry*qty*(pnl/100 + 1)
+        
+        self.equity += self.cash
+    
     def __handle_stop_exit(
             self,
             ticker,
@@ -550,58 +406,117 @@ class BackTestEnvironment(QClass):
             ), True
 
         return position.copy(), False
-    
-    def __update_equity(
+
+    def __handle_strategy_decision__(
             self,
-            ticker_positions: dict,
+            ticker,
+            date,
+            positions,
+            strategy_outs
     ):
+         
+        pos = positions[ticker].copy()
+        out = strategy_outs[ticker].copy()
 
-        self.equity = 0
+        decisions = out["decision"]
+        limits = out["limits"]
 
-        for ticker, vals in ticker_positions.items():
-            net_entry = vals["net_entry_price"]
+        ohlcv = self.processor.get_ticker_ohlcv(
+            ticker,
+            date,
+        )
 
-            if net_entry is None:
-                continue
+        pos, exit = self.__handle_stop_exit(
+            ticker=ticker,
+            date=date,
+            position=pos,
+            limits=limits,
+            ohlcv=ohlcv
+        )
 
-            qty = vals["qty"]
-            pnl = vals["pnl_pct"]
+        if exit:
+            return pos
 
-            self.equity += net_entry*qty*(pnl/100 + 1)
+        side = pos["side"]
+        size = pos["size"]
+
+        decision_side = decisions["side"]
+        decision_size = decisions["size"]
+
+        if side == 0:
+            if decision_side == 0:
+                return pos
+            elif decision_size < self.min_bet_size:
+                return pos
+            else:
+                pos = self.__enter_position(
+                    ticker=ticker,
+                    side=decision_side,
+                    bet_size=decision_size,
+                    price=ohlcv["Close"],
+                    date=date
+                )
         
-        self.equity += self.cash
+        #Decrease bet or possibly close trade
+        #Since positions are fed to the strategy class;
+        #Decision size is expected to represent size to exit
+        #If decision size is greater than size - self.min_bet_size;
+        #Position is closed
+        #Else, position's bet is decreased by decision size
+        elif decision_side == 0:
+            pos = self.__decrease_position_bet(
+                ticker=ticker,
+                position=pos,
+                price=ohlcv["Close"],
+                new_size=size-decision_size,
+                date=date
+            )
+        
+        #Since positions are fed to the strategy class;
+        #Decision size is expected to represent size to increase
+        #If decision size+size is greater than 1
+        #Position is increased by 1 - size
+        #Else, position's bet is increased by decision size
+        #If the increase size is lower than self.min_bet_size
+        #Nothing happens
+        elif decision_side == side:
+            pos = self.__increase_position_bet(
+                ticker=ticker,
+                position=pos,
+                increase_size=decision_size,
+                price=ohlcv["Close"],
+                date=date
+            )
+
+        #Reverse the position
+        #Decision size represents the size of the new position
+        #If decision size is smaller than self.min_bet_amount
+        #Closes the current position
+        elif decision_side != side:
+            if decision_size < self.min_bet_size:
+                pos = self.__close_position(
+                    ticker=ticker,
+                    position=pos,
+                    price=ohlcv["Close"],
+                    date=date
+                )
+            else:
+                pos = self.__reverse_position(
+                    ticker=ticker,
+                    position=pos,
+                    new_bet_size=decision_size,
+                    price=ohlcv["Close"],
+                    date=date
+                )
+
+        return pos
     
     def run_backtest(
             self,
-            start_date=None,
-            end_date=None
+            date_inputs,
+            start_index,
+            end_index
     ):
-        
-        main_ticker = self.processor.data_dict[self.tickers[0]].copy()
-
-        if start_date is not None:
-            start_index = self.processor.get_date_index(
-                main_ticker,
-                date=start_date,
-                earlier=False
-            )
-
-            if start_index < self.processor.cfg[self.tickers[0]]["feature_window"] - 1:
-                start_index = self.processor.cfg[self.tickers[0]]["feature_window"] - 1
-        else:
-            start_index = self.processor.cfg[self.tickers[0]]["feature_window"] - 1
-
-        if end_date is not None:
-            end_index = self.processor.get_date_index(
-                main_ticker,
-                date=end_date,
-                earlier=True
-            )
-            
-            if end_index > len(main_ticker):
-                end_index = len(main_ticker)
-        else:
-            end_index = len(main_ticker)
 
         self.equity_series = [self.equity for x in range(start_index)]
         
@@ -619,134 +534,222 @@ class BackTestEnvironment(QClass):
             for ticker in self.tickers
         }
 
-        for ind in tqdm(range(start_index, end_index)):
-
-            if self.equity <= 0:
-                break
-
-            date = main_ticker.index[ind]
+        print("Starting Backtest...")
+        for date in tqdm(list(date_inputs.keys())):
+            
+            ohlcv = self.processor.get_ohlcv(date)
 
             for ticker in self.tickers:
-                ohlcv = self.processor.get_current_ohlcv(
-                    ticker,
-                    date,
-                    earlier=True
-                )
-
                 ticker_positions[ticker] = self.__update_position(
                     position=ticker_positions[ticker],
-                    current_price=ohlcv["Close"]
+                    current_price=ohlcv[ticker]["Close"]
                 )
 
             self.__update_equity(ticker_positions)
             self.equity_series.append(self.equity)
-            
-            inputs = self.processor.get_date_inputs(
-                date, get_labels=False
+   
+            strategy_outs = self.strategy.get_strategy_out(
+                date_inputs[date], ticker_positions, ohlcv
             )
 
-            strategy_out = self.strategy.get_strategy_out(
-                inputs, ticker_positions
-            )
+            for ticker in self.tickers:
 
-            for ticker, out in strategy_out.items():
-
-                decisions = out["decision"]
-                limits = out["limits"]
-
-                ohlcv = self.processor.get_current_ohlcv(
-                    ticker,
-                    date,
-                    earlier=True
-                )
-
-                ticker_positions[ticker], exit = self.__handle_stop_exit(
+                pos = self.__handle_strategy_decision__(
                     ticker=ticker,
                     date=date,
-                    position=ticker_positions[ticker],
-                    limits=limits,
-                    ohlcv=ohlcv
+                    positions=ticker_positions, 
+                    strategy_outs=strategy_outs
                 )
 
-                if exit:
-                    continue
+                ticker_positions[ticker].update(pos)
 
-                side = ticker_positions[ticker]["side"]
-                size = ticker_positions[ticker]["size"]
+        self.equity_series = pd.Series(
+                self.equity_series, 
+                index=self.processor.data_dict[self.tickers[0]].index[:end_index]
+        )
 
-                decision_side = decisions["side"]
-                decision_size = decisions["size"]
+        return self.__report_backtest()
+    
+    def __report_backtest(
+            self
+    ):
 
-                if side == 0:
-                    if decision_side == 0:
-                        continue
-                    elif decision_size < self.min_bet_size:
-                        continue
-                    else:
-                        ticker_positions[ticker] = self.__enter_position(
-                            ticker=ticker,
-                            side=decision_side,
-                            bet_size=decision_size,
-                            price=ohlcv["Close"],
-                            date=date
-                        )
+        ticker_groupted_actions = {
+            ticker: [
+                action for action in self.actions
+                if action["Ticker"] == ticker
+            ]
+            for ticker in self.tickers
+        }
+
+        ticker_tracking = {
+            ticker: {
+                "in_trade": False,
+                "last_trade": 0,
+                "start_side": 0,
+                "net_entry_price": 0,
+                "net_trade_qty": 0,
+                "start_date": 0,
+                "current_qty": 0,
+                "net_exit_price": 0,
+            }
+            for ticker in self.tickers
+        }
+
+        if self.actions == []:
+            return pd.DataFrame(), pd.DataFrame()
+
+        for action in self.actions:
+
+            ticker = action["Ticker"]
+            in_trade = ticker_tracking[ticker]["in_trade"]
+
+            action_side = action["Side"]
+            action_qty = action["QTY"]
+            action_price = action["Price"]
+
+            if in_trade:
                 
-                #Decrease bet or possibly close trade
-                #Since positions are fed to the strategy class;
-                #Decision size is expected to represent size to exit
-                #If decision size is greater than size - self.min_bet_size;
-                #Position is closed
-                #Else, position's bet is decreased by decision size
-                elif decision_side == 0:
-                    ticker_positions[ticker] = self.__decrease_position_bet(
-                        ticker=ticker,
-                        position=ticker_positions[ticker],
-                        price=ohlcv["Close"],
-                        new_size=size-decision_size,
-                        date=date
-                    )
+                trade_side = ticker_tracking[ticker]["start_side"]
+                net_entry = ticker_tracking[ticker]["net_entry_price"]
+                net_qty = ticker_tracking[ticker]["net_trade_qty"]
+
+                #Increment trade size
+                if trade_side == action_side:
+                    
+                    ticker_tracking[ticker]["net_entry_price"] = (net_entry*net_qty + action_price*action_qty)/(net_qty+action_qty)
+
+                    ticker_tracking[ticker]["current_qty"] += action_qty
+                    ticker_tracking[ticker]["net_trade_qty"] += action_qty
                 
-                #Since positions are fed to the strategy class;
-                #Decision size is expected to represent size to increase
-                #If decision size+size is greater than 1
-                #Position is increased by 1 - size
-                #Else, position's bet is increased by decision size
-                #If the increase size is lower than self.min_bet_size
-                #Nothing happens
-                elif decision_side == side:
-                    ticker_positions[ticker] = self.__increase_position_bet(
-                        ticker=ticker,
-                        position=ticker_positions[ticker],
-                        increase_size=decision_size,
-                        price=ohlcv["Close"],
-                        date=date
-                    )
+                #Decrement, exit or reverse trade
+                elif trade_side != action_side:
+                    
+                    cur_qty = ticker_tracking[ticker]["current_qty"]
 
-                #Reverse the position
-                #Decision size represents the size of the new position
-                #If decision size is smaller than self.min_bet_amount
-                #Closes the current position
-                elif decision_side != side:
-                    if decision_size < self.min_bet_size:
-                        ticker_positions[ticker] = self.__close_position(
-                            ticker=ticker,
-                            position=ticker_positions[ticker],
-                            price=ohlcv["Close"],
-                            date=date
-                        )
-                    else:
-                        ticker_positions[ticker] = self.__reverse_position(
-                            ticker=ticker,
-                            position=ticker_positions[ticker],
-                            new_bet_size=decision_size,
-                            price=ohlcv["Close"],
-                            date=date
-                        )
+                    net_exit = ticker_tracking[ticker]["net_exit_price"]                        
+                    net_exited_qty = ticker_tracking[ticker]["net_trade_qty"] - cur_qty
 
-        self.equity_series = pd.Series(self.equity_series, index=main_ticker.index[:end_index])
-        return self.__report_backtest()  
+                    #Decrement
+                    if cur_qty > action_qty:
+                    
+                        ticker_tracking[ticker]["net_exit_price"] = (net_exit*net_exited_qty + action_price*action_qty)/(net_exited_qty+action_qty)
+                        ticker_tracking[ticker]["current_qty"] -= action_qty
+                    
+                    #Close Trade
+                    elif cur_qty == action_qty:
+                        trade_exit_price = (net_exit*net_exited_qty + action_price*action_qty)/(net_exited_qty+action_qty)
 
-class BackTestEvaluator(QClass):
+                        pnl = trade_side*net_qty*(trade_exit_price-net_entry)
+                        pnl_pct = trade_side*100*(trade_exit_price/net_entry - 1)
+                        total_fee = net_qty*self.fee*(net_entry+trade_exit_price)
+
+                        trade_info = {
+                            "Ticker": ticker,
+                            "Trade Side": trade_side,
+                            "Net QTY": net_qty,
+                            "Net Entry": net_entry,
+                            "Net Exit": trade_exit_price,
+                            "PnL": pnl,
+                            "PnL%": pnl_pct,
+                            "Fee": total_fee,
+                            "Entry Date": ticker_tracking[ticker]["start_date"],
+                            "Exit Date": action["Date"],
+                            "Exit Type": action["Action"]                 
+                        }
+
+                        lt = ticker_tracking[ticker]["last_trade"]
+                        self.trades[f"Trade{lt}"] = trade_info
+                        
+                        ticker_tracking[ticker] = {
+                            "in_trade": False,
+                            "last_trade": lt,
+                            "start_side": 0,
+                            "net_entry_price": 0,
+                            "net_trade_qty": 0,
+                            "start_date": 0,
+                            "current_qty": 0,
+                            "net_exit_price": 0,
+                        }
+
+                    #Reverse
+                    elif cur_qty < action_qty:
+                        #action_qty = cur_qty + new_position_qty
+
+                        trade_exit_price = (net_exit*net_exited_qty + action_price*cur_qty)/(net_exited_qty+cur_qty)
+
+                        pnl = trade_side*net_qty*(trade_exit_price-net_entry)
+                        pnl_pct = trade_side*100*(trade_exit_price/net_entry - 1)
+                        total_fee = net_qty*self.fee*(net_entry+trade_exit_price)
+
+                        trade_info = {
+                            "Ticker": ticker,
+                            "Trade Side": trade_side,
+                            "Net QTY": net_qty,
+                            "Net Entry": net_entry,
+                            "Net Exit": trade_exit_price,
+                            "PnL": pnl,
+                            "PnL%": pnl_pct,
+                            "Fee": total_fee,
+                            "Entry Date": ticker_tracking[ticker]["start_date"],
+                            "Exit Date": action["Date"]                           
+                        }
+
+                        lt = ticker_tracking[ticker]["last_trade"]
+                        self.trades[f"Trade{lt}"] = trade_info
+
+                        new_position_qty = action_qty - cur_qty
+
+                        ticker_tracking[ticker] = {
+                            "in_trade": True,
+                            "last_trade": lt+1,
+                            "start_side": action_side,
+                            "net_entry_price": action_price,
+                            "net_trade_qty": new_position_qty,
+                            "start_date": action["Date"],
+                            "current_qty": new_position_qty,
+                            "net_exit_price": 0,
+                        }
+
+            elif not in_trade:
+                lt = ticker_tracking[ticker]["last_trade"]
+
+                ticker_tracking[ticker] = {
+                    "in_trade": True,
+                    "last_trade": lt+1,
+                    "start_side": action_side,
+                    "net_entry_price": action_price,
+                    "net_trade_qty": action_qty,
+                    "start_date": action["Date"],
+                    "current_qty": action_qty,
+                    "net_exit_price": 0,
+                }
+
+        trade_df = pd.DataFrame(self.trades).transpose()
+
+        actions = pd.DataFrame(
+            data=np.array([list(a.values()) for a in self.actions]), 
+            index=[f"Action{x}" for x in range(len(self.actions))],
+            columns=list(self.actions[0].keys())
+        )
+
+        evaluator = BackTestEvaluator(trade_df, actions, self.equity_series)
+
+        #This is wrong implementation
+        #tickers = {
+        #    ticker: self.processor.data_dict[ticker]["Close"].loc[self.equity_series.index[0]:self.equity_series.index[-1]]
+        #    for ticker in self.tickers
+        #}
+
+        #evaluator.plot_growth(tickers)        
+        
+        stats = evaluator.report_stats()
+
+        self.reset()
+
+        return trade_df, actions, stats
+
+class BackTestEvaluator(AltaronBaseClass):
 
     def __init__(
             self,
@@ -767,6 +770,24 @@ class BackTestEvaluator(QClass):
             #Get minutes instead
             self.total_days = (self.actions["Date"].max() - self.actions["Date"].min()).seconds/60
             self.periods = "Minutely"
+    
+    def plot_growth(
+            self,
+            tickers,
+            figsize=(16,6),
+            save_to=None
+    ):
+        
+        equities = tickers.copy()
+        equities["Equity"] = self.equity_arr
+        print(equities)
+        plot_growth_comparison(
+            equities=equities,
+            figsize=figsize,
+            normalized=True,
+            save_to=save_to
+        )
+        
     
     def report_stats(self):
 

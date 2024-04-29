@@ -1,9 +1,20 @@
 import pandas as pd
 import numpy as np
 import datetime
-from altaron.base.__q_class import QClass
+from altaron.base.__base import AltaronBaseClass
+from altaron.base.__feature_extractor import FeatureExtractor
+from altaron import feature_extraction
+from altaron.mpengine import (
+    prepare_jobs,
+    infer_nan_window,
+    process_jobs,
+    combine_outputs_concat_df,
+    expand_call_fe,
+    expand_call_parallel_tickers,
+    combine_outputs_update_dictionary
+)
 
-class DataProcessor(QClass):
+class DataProcessor(AltaronBaseClass):
 
     def __init__(
             self,
@@ -33,7 +44,7 @@ class DataProcessor(QClass):
         self.cfg = {
             k: {
                 "data": None,
-                "feature_extractors": [],
+                "feature_extractor": FeatureExtractor([]),
                 "features": "all",
                 "window": 1,
                 "preprocessed": False,
@@ -53,32 +64,53 @@ class DataProcessor(QClass):
             v.freq = pd.infer_freq(v)
             self.data_dict[k] = v
         
-        for ticker in self.cfg.keys():
+        jobs = prepare_jobs(
+            func=self.__get_feature_window__,
+            data=list(self.cfg.keys()), #tickers
+            args={},
+            num_threads= len(self.cfg.keys()) #tickers
+        )
 
-            max_lookback = 0
+        fw = process_jobs(
+            jobs=jobs,
+            call_expansion=expand_call_parallel_tickers,
+            output_combination=combine_outputs_update_dictionary,
+            num_threads= len(self.cfg.keys()) #tickers
+        )
+        
+        for ticker, f_window in fw.items():
+            self.cfg[ticker]["feature_window"] = f_window
 
-            for extractor in self.cfg[ticker]["feature_extractors"]:
-                cfg = extractor.fe_config
+            #Initialize features in case features is passed as "all"
+            _ = self.get_ticker_date_inputs(
+                ticker=ticker,
+                date=self.data_dict[ticker].index[-1],
+                features=self.cfg[ticker]["features"],
+                preprocessed=False
+            )
+    
+    def __get_feature_window__(
+            self,
+            ticker
+    ):
 
-                for v in cfg.values():
-                    try:
-                        feature_window = v["window"]
-                    except:
-                        feature_window = 0
+            extractor = self.cfg[ticker]["feature_extractor"]
+            cfg = extractor.fe_config
+            dummy_data = self.data_dict[ticker].copy()
 
-                    if feature_window > max_lookback:
-                        max_lookback = feature_window
-            
-            max_lookback += 1
-            self.cfg[ticker]["feature_window"] = self.cfg[ticker]["window"] + max_lookback
+            for i in range(1,11):
+                try:
+                    max_lookback = infer_nan_window(
+                        func=extractor.apply_feature_extraction,
+                        args={},
+                        data=dummy_data[:min(i*200, len(dummy_data))]
+                    )
+                    break
+                except Exception as e:
+                    print(repr(e))
+                    continue
 
-            if not isinstance(self.cfg[ticker]["features"], list):
-                _ = self.get_ticker_date_inputs(
-                    ticker=ticker,
-                    date=self.data_dict[ticker].index[-1],
-                    features="all",
-                    preprocessed=False
-                )
+            return self.cfg[ticker]["window"] + max_lookback
     
     def __organize_df(self, df: pd.DataFrame):
         """Method for organizing a possibly unorganized dataframe while also making sure
@@ -118,6 +150,25 @@ class DataProcessor(QClass):
             raise ValueError("Index for data must be dates")
 
         return organized_df
+
+    def preprocess(self):
+
+        self.original_data_dict = self.data_dict.copy()
+
+        for ticker in self.data_dict:
+            
+            if self.cfg[ticker]["preprocessed"]:
+                continue
+
+            extractor = self.cfg[ticker]["feature_extractor"]
+            featured_data = self.__apply_feature_extraction(
+                data=self.data_dict[ticker],
+                ticker=ticker,
+                num_threads=None #func will infer
+            )
+
+            self.data_dict[ticker] = featured_data.dropna()
+            self.cfg[ticker]["preprocessed"] = True
 
     def fixed_horizon_label(
             self,
@@ -215,7 +266,7 @@ class DataProcessor(QClass):
         date_index = self.get_date_index(df, date=date, earlier=True)
 
         f_window = self.cfg[ticker]["feature_window"]
-        extractors = self.cfg[ticker]["feature_extractors"]
+        extractor = self.cfg[ticker]["feature_extractor"]
 
         featured_data = df.iloc[date_index-f_window+1:date_index+1].copy()
 
@@ -224,12 +275,17 @@ class DataProcessor(QClass):
                 Not enough past values on {ticker} on date {date}\
                 to apply feature extraction"
             
-            for extractor in extractors:
-                featured_data = extractor.apply_feature_extraction(featured_data)
+            #This is called without multiprocessing, since it is applied on a single window of data
+            featured_data = extractor.apply_feature_extraction(featured_data)
 
-        if features is None or features == "all":
-            features = featured_data.columns
-            self.cfg[ticker]["features"] = features
+        #Check if features is iterable
+        try:
+            iter(features)
+            if isinstance(features, str):
+                features = featured_data.columns
+                self.cfg[ticker]["features"] = features
+        except:
+            pass
 
         featured_data = featured_data[features].iloc[-self.cfg[ticker]["window"]:]
 
@@ -238,9 +294,9 @@ class DataProcessor(QClass):
     def get_date_inputs(
             self,
             date,
-            get_labels=True
+            get_labels=False
     ):
-        
+
         x = {
             k: self.get_ticker_date_inputs(
                 ticker=k, date=date, 
@@ -263,92 +319,158 @@ class DataProcessor(QClass):
         
         return x
     
-    def get_data_batch(
+    def backtest_results_to_training_data(
             self,
-            start_date=None,
-            end_date=None,
-            get_labels=True
+            actions: pd.DataFrame,
+            label="categorical",
+            feature_tickers = {}
     ):
         
-        x = {k: None for k in self.cfg.keys()}
-        y = x.copy()
+        """
 
-        for ticker in x.keys():
-            df = self.get_ticker(ticker)
+        Labels are assigned as the price change between
+        actions of opposite sides
 
-            if start_date is None:
-                start_ind = 0
-            else:
-                start_ind = self.get_date_index(df, start_date, earlier=False)
-            
-            if end_date is None:
-                end_ind = len(df)-1
-            else:
-                end_ind = self.get_date_index(df, end_date, earlier=True)
-            
-            label_window = 0
-            feature_window = self.cfg[ticker]["feature_window"]
+        Function of the feature tickers is this;
+        
+        On date inputs for date T suppose we have inputs for ticker Y;
 
-            if get_labels:
-                if self.cfg[ticker]["label"] is not None:
-                    label_window = self.cfg[ticker]["label"][1]["h"]
-            
-            cur_x = []
-            cur_y = []
+        date_inputs[T][Y] = arr0
 
-            for ind in range(start_ind+feature_window, end_ind-label_window):
-                date = df.index[ind]
+        We want to use the inputs for Y as additional features for X.
 
-                cur_vals = self.get_ticker_date_inputs(
-                                    ticker, date, 
+        Hence, features for ticker X is given as;
+
+        date_inputs[T][X] = arr1
+
+        features[X]_T = concatenate(arr0, arr1)
+         
+        """
+        features = {
+                ticker: []
+                for ticker in actions["Ticker"].unique()
+            }
+
+        targets = {
+                ticker: []
+                for ticker in actions["Ticker"].unique()
+            }
+
+
+        for ticker in features.keys():
+            ticker_actions = actions[actions["Ticker"] == ticker].copy()
+            for row in range(len(ticker_actions)):
+                if ticker_actions["Action"].iloc[row] != "Entry":
+                    continue
+                
+                if row == len(ticker_actions) - 1:
+                    break
+
+                action_side = ticker_actions["Side"].iloc[row]
+                action_price = ticker_actions["Price"].iloc[row]
+                action_date = ticker_actions["Date"].iloc[row]
+
+                action_features = self.get_ticker_date_inputs(
+                                    ticker = ticker,
+                                    date = action_date,
                                     features=self.cfg[ticker]["features"],
                                     preprocessed=self.cfg[ticker]["preprocessed"]
-                            )
-                
-                cur_x.append(cur_vals.values)
-                
-                if get_labels:
-                    if self.cfg[ticker]["label"] is None:
-                        cur_label = np.nan
+                                ).values
+
+                if action_features.ndim == 2:
+                    if len(action_features) == 1:
+                        action_features = np.squeeze(action_features, axis=0)
                     else:
-                        cur_label = getattr(
-                                self, self.cfg[ticker]["label"][0]
-                                )(ticker=ticker, date=date, **self.cfg[ticker]["label"][1])
-                    
-                    cur_y.append(cur_label)
-            
-            n_window, n_features = cur_x[0].shape
+                        action_features = action_features[-1, :]
+                
+                if ticker in feature_tickers.keys():
 
-            cur_x = np.array(cur_x).reshape(len(cur_x), n_window, n_features)
-            cur_y = np.array(cur_y).reshape(len(cur_y), 1)
+                    if isinstance(feature_tickers[ticker], str):
+                        additional = self.get_ticker_date_inputs(
+                                        ticker = feature_tickers[ticker],
+                                        date = action_date,
+                                        features=self.cfg[ticker]["features"],
+                                        preprocessed=self.cfg[ticker]["preprocessed"]
+                                    ).values
 
-            x[ticker] = cur_x
-            y[ticker] = cur_y
-        
-        if get_labels:
-            return (x, y)
-        
-        return x
+                        if additional.ndim == 2:
+                            if len(additional) == 1:
+                                additional = np.squeeze(additional, axis=0)
+                            else:
+                                additional = additional[-1, :]
+                        
+                        action_features = np.concatenate((action_features, additional), axis=-1)
+
+                    elif isinstance(feature_tickers[ticker], list):
+                        
+                        for v in feature_tickers[ticker]:
+                            additional = self.get_ticker_date_inputs(
+                                            ticker = v,
+                                            date = action_date,
+                                            features=self.cfg[ticker]["features"],
+                                            preprocessed=self.cfg[ticker]["preprocessed"]
+                                        ).values
+
+                            if additional.ndim == 2:
+                                if len(additional) == 1:
+                                    additional = np.squeeze(additional, axis=0)
+                                else:
+                                    additional = additional[-1, :]
+                            
+                            action_features = np.concatenate((action_features, additional), axis=-1)
+
+                end_loop = True
+                for row2 in range(row+1, len(ticker_actions)):
+                    if ticker_actions["Action"].iloc[row2] == "Entry":
+                        continue
+
+                    exit_price = ticker_actions["Price"].iloc[row2]
+                    end_loop = False
+                    break
+                
+                if end_loop:
+                    break
+
+                price_change = action_side*(exit_price/action_price - 1)
+
+                if label == "categorical":
+                    action_target = int(bool(price_change > 0))
+                else:
+                    action_target = price_change
+
+                features[ticker].append(action_features)
+                targets[ticker].append(action_target)
+                
+        return features, targets
     
-    def preprocess(self):
+    def __apply_feature_extraction(
+            self,
+            data,
+            ticker,
+            num_threads=None
+    ):
+        
+        extractor = self.cfg[ticker]["feature_extractor"]
+        df = data.copy()
 
-        self.original_data_dict = self.data_dict.copy()
+        jobs = prepare_jobs(
+            func=extractor.apply_feature_extraction,
+            data=df,
+            args={},
+            num_threads=None, #function will infer based on cpu count,
+            extend_parts=self.cfg[ticker]["feature_window"]
+        )
 
-        for ticker in self.data_dict:
-            
-            if self.cfg[ticker]["preprocessed"]:
-                continue
+        df = process_jobs(
+            jobs=jobs,
+            call_expansion=expand_call_fe,
+            output_combination=combine_outputs_concat_df,
+            num_threads=None #function will infer
+        )
 
-            extractors = self.cfg[ticker]["feature_extractors"]
-            featured_data = self.data_dict[ticker].copy()
+        return df
 
-            for extractor in extractors:
-                featured_data = extractor.apply_feature_extraction(featured_data)
-
-            self.data_dict[ticker] = featured_data.dropna()
-            self.cfg[ticker]["preprocessed"] = True
-
-    def get_current_ohlcv(
+    def get_ticker_ohlcv(
             self,
             ticker,
             date,
@@ -361,6 +483,16 @@ class DataProcessor(QClass):
 
         return data[["Open", "High", "Low", "Close", "Volume"]].loc[date_match]
 
+    def get_ohlcv(
+           self,
+           date 
+    ):
+        ohlcv = {
+            ticker: self.get_ticker_ohlcv(ticker, date, earlier=True)
+            for ticker in self.data_dict.keys()
+        }
+        
+        return ohlcv
 
     def get_current_price(
             self,
@@ -411,6 +543,15 @@ class DataProcessor(QClass):
         index = np.where(df.index == nearest_match)[0][0]
 
         return index
+    
+    def get_index_date(
+            self,
+            index
+    ):
+        
+        main_ticker = list(self.data_dict.values())[0].copy()
+
+        return main_ticker.index[index]
 
     def get_ticker(self, ticker=None):
         
